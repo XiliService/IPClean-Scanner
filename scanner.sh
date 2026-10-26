@@ -14,7 +14,7 @@ set -u
 # ------------------------------------------------------------------------------
 # Global Metadata & Constants
 # ------------------------------------------------------------------------------
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 REPO_OWNER="XiliService"
 REPO_NAME="IPClean-Scanner"
 DEFAULT_BRANCH="main"
@@ -731,10 +731,15 @@ verify_ip_tls() {
 
     local hdr_file="${out_file}.hdr"
     local body_file="${out_file}.body"
-
+    local error_file="${out_file}.err"
+    local fail_file="${out_file}.fail"
     local target_url="https://${sni}:${port}${req_path}"
     local curl_metrics=""
+    local curl_exit=0
 
+    # Preserve curl's write-out metrics even when the HTTP transfer fails.
+    # Appending synthetic defaults here corrupts the last parsed field and can
+    # incorrectly turn a completed TLS handshake into an apparent TLS failure.
     curl_metrics="$(curl -sS -L --max-redirs 0 \
         --resolve "${sni}:${port}:${ip}" \
         --connect-timeout "${tls_timeout}" \
@@ -744,22 +749,32 @@ verify_ip_tls() {
         -D "${hdr_file}" \
         -o "${body_file}" \
         -w "%{http_code}|%{time_appconnect}|%{time_starttransfer}|%{ssl_verify_result}" \
-        "${target_url}" 2>/dev/null || printf "000|0|0|99")"
+        "${target_url}" 2>"${error_file}")" || curl_exit=$?
 
-    local http_code t_tls t_ttfb ssl_verify
+    local http_code="000" t_tls="0" t_ttfb="0" ssl_verify="99"
     IFS='|' read -r http_code t_tls t_ttfb ssl_verify <<< "${curl_metrics}"
 
     local tls_ms ttfb_ms
     tls_ms="$(awk -v t="${t_tls:-0}" 'BEGIN { printf "%d", int(t * 1000 + 0.5) }')"
     ttfb_ms="$(awk -v t="${t_ttfb:-0}" 'BEGIN { printf "%d", int(t * 1000 + 0.5) }')"
 
-    # Must complete TLS handshake (tls_ms > 0) and return a valid HTTP status from Cloudflare
-    if [ "${tls_ms}" -le 0 ] || [ "${http_code}" = "000" ] || [ "${ssl_verify:-99}" != "0" ]; then
-        rm -f "${hdr_file}" "${body_file}" 2>/dev/null || true
+    local failure_reason=""
+    if [ "${tls_ms}" -le 0 ]; then
+        failure_reason="TLS_HANDSHAKE_FAILED"
+    elif [ "${ssl_verify:-99}" != "0" ]; then
+        failure_reason="CERTIFICATE_VALIDATION_FAILED"
+    elif [ "${http_code:-000}" = "000" ]; then
+        failure_reason="TLS_OK_HTTP_NO_RESPONSE"
+    fi
+
+    if [ -n "${failure_reason}" ]; then
+        printf "%s|%s|%s|%s|%s|%s\n" \
+            "${failure_reason}" "${ip}" "${port}" "${tls_ms}" "${http_code:-000}" "${curl_exit}" > "${fail_file}"
+        rm -f "${hdr_file}" "${body_file}" "${error_file}" 2>/dev/null || true
         return 1
     fi
 
-    # Verify Cloudflare presence and extract COLO (e.g. FRA, AMS, MUC, LHR)
+    # Verify Cloudflare presence and extract COLO (e.g. FRA, AMS, MUC, LHR).
     local colo=""
     if [ -f "${body_file}" ]; then
         colo="$(sed -n 's/^colo=\([A-Za-z0-9_-]*\).*/\1/p' "${body_file}" 2>/dev/null | head -n1 | tr -d '\r\n')"
@@ -768,7 +783,6 @@ verify_ip_tls() {
         colo="$(grep -i '^cf-ray:' "${hdr_file}" 2>/dev/null | head -n1 | sed -n 's/.*-\([A-Za-z]\{3\}\).*/\1/p' | tr '[:lower:]' '[:upper:]' | tr -d '\r\n')"
     fi
 
-    # Verify response is genuinely served by Cloudflare edge
     local is_cf=0
     if [ -n "${colo}" ]; then
         is_cf=1
@@ -777,7 +791,7 @@ verify_ip_tls() {
         colo="CF"
     fi
 
-    # If user tested custom SNI that didn't emit cf-ray on root path, probe /cdn-cgi/trace on same IP:PORT
+    # For custom paths, confirm the edge with the standard Cloudflare trace path.
     if [ "${is_cf}" -eq 0 ]; then
         local trace_out=""
         trace_out="$(curl -fsSL --resolve "${sni}:${port}:${ip}" --connect-timeout 2 --max-time 3 "https://${sni}:${port}/cdn-cgi/trace" 2>/dev/null || true)"
@@ -787,9 +801,11 @@ verify_ip_tls() {
         fi
     fi
 
-    rm -f "${hdr_file}" "${body_file}" 2>/dev/null || true
+    rm -f "${hdr_file}" "${body_file}" "${error_file}" 2>/dev/null || true
 
     if [ "${is_cf}" -eq 0 ]; then
+        printf "%s|%s|%s|%s|%s|%s\n" \
+            "HTTP_RESPONSE_NOT_CONFIRMED_CLOUDFLARE" "${ip}" "${port}" "${tls_ms}" "${http_code}" "${curl_exit}" > "${fail_file}"
         return 1
     fi
 
@@ -1000,12 +1016,30 @@ execute_scan_pipeline() {
     tls_passed_count="$(wc -l < "${tls_passed_file}" 2>/dev/null | tr -d ' ' || printf "0")"
 
     if [ "${tls_passed_count}" -eq 0 ]; then
-        printf "  %b[-] No IPs completed TLS handshake for SNI '${target_sni}'.%b\n" "${C_RED}" "${C_RESET}"
-        printf "  %b[i] Tip: Ensure '${target_sni}' is proxied (Orange Cloud) on Cloudflare and not blocked.${C_RESET}\n" "${C_YELLOW}"
+        local tls_fail_file="${WORK_DIR}/tls_failures.txt"
+        cat "${tls_dir}"/*.fail > "${tls_fail_file}" 2>/dev/null || true
+        printf "  %b[-] No endpoint passed TLS, HTTP, and Cloudflare verification for SNI '${target_sni}'.%b\n" "${C_RED}" "${C_RESET}"
+
+        local fail_reason fail_count
+        for fail_reason in TLS_HANDSHAKE_FAILED CERTIFICATE_VALIDATION_FAILED TLS_OK_HTTP_NO_RESPONSE HTTP_RESPONSE_NOT_CONFIRMED_CLOUDFLARE; do
+            fail_count="$(awk -F'|' -v reason="${fail_reason}" '$1 == reason { n++ } END { print n + 0 }' "${tls_fail_file}")"
+            if [ "${fail_count}" -gt 0 ]; then
+                case "${fail_reason}" in
+                    TLS_HANDSHAKE_FAILED) printf "  %b- TLS connection/handshake failed: %d endpoint(s).%b\n" "${C_YELLOW}" "${fail_count}" "${C_RESET}" ;;
+                    CERTIFICATE_VALIDATION_FAILED) printf "  %b- TLS connected, but certificate validation failed: %d endpoint(s).%b\n" "${C_YELLOW}" "${fail_count}" "${C_RESET}" ;;
+                    TLS_OK_HTTP_NO_RESPONSE)
+                        printf "  %b- TLS handshake and certificate passed, but no HTTP response arrived: %d endpoint(s).%b\n" "${C_YELLOW}" "${fail_count}" "${C_RESET}"
+                        awk -F'|' '$1 == "TLS_OK_HTTP_NO_RESPONSE" && shown < 3 { printf "      %s:%s (TLS %sms, curl exit %s)", $2, $3, $4, $6; print ""; shown++ }' "${tls_fail_file}"
+                        ;;
+                    HTTP_RESPONSE_NOT_CONFIRMED_CLOUDFLARE) printf "  %b- HTTP responded, but Cloudflare could not be confirmed: %d endpoint(s).%b\n" "${C_YELLOW}" "${fail_count}" "${C_RESET}" ;;
+                esac
+            fi
+        done
+        printf "  %b[i] This separates TLS handshake success from successful HTTPS data exchange; inspect the SNI, request path, and network filtering.%b\n" "${C_CYAN}" "${C_RESET}"
         pause_enter
         return 1
     fi
-    printf "  %b[+] %d IP:Port endpoints passed real TLS handshake verification.%b\n" \
+    printf "  %b[+] %d IP:Port endpoints passed TLS, HTTP, and Cloudflare verification.%b\n" \
         "${C_GREEN}" "${tls_passed_count}" "${C_RESET}"
 
     # Sort locally tested endpoints by (latency + TLS time) and limit the final table.
