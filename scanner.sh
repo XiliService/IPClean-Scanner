@@ -14,7 +14,7 @@ set -u
 # ------------------------------------------------------------------------------
 # Global Metadata & Constants
 # ------------------------------------------------------------------------------
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.4.0"
 REPO_OWNER="XiliService"
 REPO_NAME="IPClean-Scanner"
 DEFAULT_BRANCH="main"
@@ -106,6 +106,15 @@ OFFICIAL_RANGES=(
     "104.24.0.0/14"
     "172.64.0.0/13"
     "131.0.72.0/22"
+)
+
+# Domains the user reported working as VLESS address values; resolve and probe
+# them on the current WSL network as DNS controls.
+CLOUDFLARE_TEST_DOMAINS=(
+    "cloudflare.com"
+    "developers.cloudflare.com"
+    "blog.cloudflare.com"
+    "radar.cloudflare.com"
 )
 
 # ------------------------------------------------------------------------------
@@ -1045,7 +1054,7 @@ menu_quick_scan() {
     local profile_port
     profile_port="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "${profile_file}")"
 
-    printf "\n%b\n" "${C_CYAN}${C_BOLD}Scan plan: 96 sampled Cloudflare IPs plus cloudflare.com DNS answers, port ${profile_port}, up to ${worker_count} real Xray tunnel tests at once.${C_RESET}"
+    printf "\n%b\n" "${C_CYAN}${C_BOLD}Scan plan: 96 sampled Cloudflare IPs plus DNS answers for known-working Cloudflare domains, port ${profile_port}, up to ${worker_count} real Xray tunnel tests at once.${C_RESET}"
     printf "  %b[1]%b Start scan\n" "${C_GREEN}${C_BOLD}" "${C_RESET}"
     printf "  %b[0]%b Cancel\n" "${C_WHITE}${C_BOLD}" "${C_RESET}"
     local start_choice=""
@@ -1058,23 +1067,32 @@ menu_quick_scan() {
 
     local candidates_file="${WORK_DIR}/candidates.txt"
     local random_candidates_file="${WORK_DIR}/random_candidates.txt"
+    local dns_map_file="${WORK_DIR}/cloudflare_dns_map.txt"
     local dns_candidates_file="${WORK_DIR}/cloudflare_dns_ips.txt"
     local tcp_open_file="${WORK_DIR}/tcp_open.txt"
     local results_dir="${WORK_DIR}/xray_results"
     mkdir -p "${results_dir}"
 
     print_stage_header 1 3 "Sampling Cloudflare IPv4 Candidates"
-    resolve_ipv4_addresses "cloudflare.com" > "${dns_candidates_file}"
+    : > "${dns_map_file}"
+    local dns_domain dns_address
+    for dns_domain in "${CLOUDFLARE_TEST_DOMAINS[@]}"; do
+        while IFS= read -r dns_address; do
+            [ -n "${dns_address}" ] && printf "%s|%s\n" "${dns_address}" "${dns_domain}" >> "${dns_map_file}"
+        done < <(resolve_ipv4_addresses "${dns_domain}")
+    done
+    cut -d'|' -f1 "${dns_map_file}" | awk 'NF && !seen[$0]++' > "${dns_candidates_file}"
     generate_candidate_ips "${candidate_count}" "${GOLDEN_RANGES[@]}" "${OFFICIAL_RANGES[@]}" > "${random_candidates_file}"
     { cat "${dns_candidates_file}" "${random_candidates_file}"; } | awk 'NF && !seen[$0]++' > "${candidates_file}"
     local generated_count dns_ip_count
     generated_count="$(wc -l < "${candidates_file}" | tr -d ' ')"
     dns_ip_count="$(wc -l < "${dns_candidates_file}" | tr -d ' ')"
-    printf "  %b[+] Generated %d candidates: 96 sampled Cloudflare IPs plus %d current cloudflare.com DNS IPv4 answers (deduplicated).%b\n" "${C_GREEN}" "${generated_count}" "${dns_ip_count}" "${C_RESET}"
+    printf "  %b[+] Generated %d candidates: 96 sampled Cloudflare IPs plus %d distinct IPv4 answers from the tested domains (deduplicated).%b\n" "${C_GREEN}" "${generated_count}" "${dns_ip_count}" "${C_RESET}"
     if [ "${dns_ip_count}" -gt 0 ]; then
-        printf "  Current cloudflare.com DNS answers included: %s\n" "$(paste -sd ',' "${dns_candidates_file}" | sed 's/,/, /g')"
+        printf "%b\n" "  DNS A answers included (domain -> IPv4):"
+        awk -F'|' '!shown[$1 "|" $2]++ { printf "    %-32s %s\n", $2, $1 }' "${dns_map_file}"
     else
-        printf "%b\n" "${C_YELLOW}[i] Could not resolve cloudflare.com IPv4 answers in WSL; continuing with sampled candidates.${C_RESET}"
+        printf "%b\n" "${C_YELLOW}[i] Could not resolve any tested Cloudflare domain to IPv4 in WSL; continuing with sampled candidates.${C_RESET}"
     fi
 
     print_stage_header 2 3 "Checking TCP Reachability on the Profile Port ${profile_port}"
@@ -1127,22 +1145,26 @@ menu_quick_scan() {
     fi
 
     local domain_control_tcp_ms domain_control_curl_error domain_control_xray_error domain_control_user_id
-    printf "\n%b\n" "${C_CYAN}${C_BOLD}DNS control: cloudflare.com:${profile_port} (profile Host/SNI remain unchanged)${C_RESET}"
-    if domain_control_tcp_ms="$(check_single_tcp "cloudflare.com" "${profile_port}")"; then
-        if probe_candidate_with_xray "${profile_file}" "cloudflare.com" "${domain_control_tcp_ms}" 999 "${WORK_DIR}/cloudflare_domain.result"; then
-            printf "%b\n" "${C_GREEN}[+] cloudflare.com domain control PASSED on this network.${C_RESET}"
+    local domain_control_index=990 domain_control
+    for domain_control in "${CLOUDFLARE_TEST_DOMAINS[@]}"; do
+        printf "\n%b\n" "${C_CYAN}${C_BOLD}DNS control: ${domain_control}:${profile_port} (profile Host/SNI remain unchanged)${C_RESET}"
+        if domain_control_tcp_ms="$(check_single_tcp "${domain_control}" "${profile_port}")"; then
+            if probe_candidate_with_xray "${profile_file}" "${domain_control}" "${domain_control_tcp_ms}" "${domain_control_index}" "${WORK_DIR}/domain_control_${domain_control_index}.result"; then
+                printf "%b\n" "${C_GREEN}[+] ${domain_control} domain control PASSED on this network.${C_RESET}"
+            else
+                printf "%b\n" "${C_YELLOW}[i] ${domain_control} resolved and accepted TCP, but the profile tunnel did not complete.${C_RESET}"
+                domain_control_curl_error="$(head -n1 "${WORK_DIR}/xray_probe_${domain_control_index}/curl.err" 2>/dev/null | sed 's/[|]/ /g;s/[[:cntrl:]]/ /g' | cut -c1-180)"
+                domain_control_xray_error="$(grep -Ei 'error|failed|timeout|rejected|handshake' "${WORK_DIR}/xray_probe_${domain_control_index}/xray.log" 2>/dev/null | tail -n1 | sed 's/[|]/ /g;s/[[:cntrl:]]/ /g' | cut -c1-180)"
+                domain_control_user_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "${profile_file}")"
+                [ -n "${domain_control_user_id}" ] && domain_control_xray_error="${domain_control_xray_error//${domain_control_user_id}/[hidden]}"
+                [ -n "${domain_control_curl_error}" ] && printf "  curl: %s\n" "${domain_control_curl_error}"
+                [ -n "${domain_control_xray_error}" ] && printf "  Xray: %s\n" "${domain_control_xray_error}"
+            fi
         else
-            printf "%b\n" "${C_YELLOW}[i] cloudflare.com resolved and accepted TCP, but the profile tunnel did not complete.${C_RESET}"
-            domain_control_curl_error="$(head -n1 "${WORK_DIR}/xray_probe_999/curl.err" 2>/dev/null | sed 's/[|]/ /g;s/[[:cntrl:]]/ /g' | cut -c1-180)"
-            domain_control_xray_error="$(grep -Ei 'error|failed|timeout|rejected|handshake' "${WORK_DIR}/xray_probe_999/xray.log" 2>/dev/null | tail -n1 | sed 's/[|]/ /g;s/[[:cntrl:]]/ /g' | cut -c1-180)"
-            domain_control_user_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "${profile_file}")"
-            [ -n "${domain_control_user_id}" ] && domain_control_xray_error="${domain_control_xray_error//${domain_control_user_id}/[hidden]}"
-            [ -n "${domain_control_curl_error}" ] && printf "  curl: %s\n" "${domain_control_curl_error}"
-            [ -n "${domain_control_xray_error}" ] && printf "  Xray: %s\n" "${domain_control_xray_error}"
+            printf "%b\n" "${C_YELLOW}[i] ${domain_control} is TCP-unreachable on the profile port from this WSL network.${C_RESET}"
         fi
-    else
-        printf "%b\n" "${C_YELLOW}[i] cloudflare.com is TCP-unreachable on the profile port from this WSL network.${C_RESET}"
-    fi
+        domain_control_index=$((domain_control_index + 1))
+    done
 
     print_stage_header 3 3 "Testing the Real VLESS/XHTTP Tunnel and HTTPS Egress"
     local idx=0
