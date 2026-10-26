@@ -14,7 +14,7 @@ set -u
 # ------------------------------------------------------------------------------
 # Global Metadata & Constants
 # ------------------------------------------------------------------------------
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 REPO_OWNER="XiliService"
 REPO_NAME="IPClean-Scanner"
 DEFAULT_BRANCH="main"
@@ -920,6 +920,22 @@ except OSError:
 PY
 }
 
+resolve_ipv4_addresses() {
+    python3 - "$1" <<'PY'
+import socket, sys
+host = sys.argv[1]
+seen = set()
+try:
+    for item in socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM):
+        address = item[4][0]
+        if address not in seen:
+            seen.add(address)
+            print(address)
+except OSError:
+    pass
+PY
+}
+
 probe_candidate_with_xray() {
     local profile_file="$1"
     local candidate_ip="$2"
@@ -1029,7 +1045,7 @@ menu_quick_scan() {
     local profile_port
     profile_port="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "${profile_file}")"
 
-    printf "\n%b\n" "${C_CYAN}${C_BOLD}Scan plan: 96 Cloudflare candidate IPs, configured port ${profile_port}, up to ${worker_count} real Xray tunnel tests at once.${C_RESET}"
+    printf "\n%b\n" "${C_CYAN}${C_BOLD}Scan plan: 96 sampled Cloudflare IPs plus cloudflare.com DNS answers, port ${profile_port}, up to ${worker_count} real Xray tunnel tests at once.${C_RESET}"
     printf "  %b[1]%b Start scan\n" "${C_GREEN}${C_BOLD}" "${C_RESET}"
     printf "  %b[0]%b Cancel\n" "${C_WHITE}${C_BOLD}" "${C_RESET}"
     local start_choice=""
@@ -1041,15 +1057,25 @@ menu_quick_scan() {
     fi
 
     local candidates_file="${WORK_DIR}/candidates.txt"
+    local random_candidates_file="${WORK_DIR}/random_candidates.txt"
+    local dns_candidates_file="${WORK_DIR}/cloudflare_dns_ips.txt"
     local tcp_open_file="${WORK_DIR}/tcp_open.txt"
     local results_dir="${WORK_DIR}/xray_results"
     mkdir -p "${results_dir}"
 
     print_stage_header 1 3 "Sampling Cloudflare IPv4 Candidates"
-    generate_candidate_ips "${candidate_count}" "${GOLDEN_RANGES[@]}" "${OFFICIAL_RANGES[@]}" > "${candidates_file}"
-    local generated_count
+    resolve_ipv4_addresses "cloudflare.com" > "${dns_candidates_file}"
+    generate_candidate_ips "${candidate_count}" "${GOLDEN_RANGES[@]}" "${OFFICIAL_RANGES[@]}" > "${random_candidates_file}"
+    { cat "${dns_candidates_file}" "${random_candidates_file}"; } | awk 'NF && !seen[$0]++' > "${candidates_file}"
+    local generated_count dns_ip_count
     generated_count="$(wc -l < "${candidates_file}" | tr -d ' ')"
-    printf "  %b[+] Generated %d sample candidates from curated and official Cloudflare ranges.%b\n" "${C_GREEN}" "${generated_count}" "${C_RESET}"
+    dns_ip_count="$(wc -l < "${dns_candidates_file}" | tr -d ' ')"
+    printf "  %b[+] Generated %d candidates: 96 sampled Cloudflare IPs plus %d current cloudflare.com DNS IPv4 answers (deduplicated).%b\n" "${C_GREEN}" "${generated_count}" "${dns_ip_count}" "${C_RESET}"
+    if [ "${dns_ip_count}" -gt 0 ]; then
+        printf "  Current cloudflare.com DNS answers included: %s\n" "$(paste -sd ',' "${dns_candidates_file}" | sed 's/,/, /g')"
+    else
+        printf "%b\n" "${C_YELLOW}[i] Could not resolve cloudflare.com IPv4 answers in WSL; continuing with sampled candidates.${C_RESET}"
+    fi
 
     print_stage_header 2 3 "Checking TCP Reachability on the Profile Port ${profile_port}"
     check_tcp_candidates "${candidates_file}" "${profile_port}" "${tcp_open_file}"
@@ -1098,6 +1124,24 @@ menu_quick_scan() {
         fi
     else
         printf "%b\n" "${C_YELLOW}[i] Original-address control is TCP-unreachable from this network; candidate scan will continue.${C_RESET}"
+    fi
+
+    local domain_control_tcp_ms domain_control_curl_error domain_control_xray_error domain_control_user_id
+    printf "\n%b\n" "${C_CYAN}${C_BOLD}DNS control: cloudflare.com:${profile_port} (profile Host/SNI remain unchanged)${C_RESET}"
+    if domain_control_tcp_ms="$(check_single_tcp "cloudflare.com" "${profile_port}")"; then
+        if probe_candidate_with_xray "${profile_file}" "cloudflare.com" "${domain_control_tcp_ms}" 999 "${WORK_DIR}/cloudflare_domain.result"; then
+            printf "%b\n" "${C_GREEN}[+] cloudflare.com domain control PASSED on this network.${C_RESET}"
+        else
+            printf "%b\n" "${C_YELLOW}[i] cloudflare.com resolved and accepted TCP, but the profile tunnel did not complete.${C_RESET}"
+            domain_control_curl_error="$(head -n1 "${WORK_DIR}/xray_probe_999/curl.err" 2>/dev/null | sed 's/[|]/ /g;s/[[:cntrl:]]/ /g' | cut -c1-180)"
+            domain_control_xray_error="$(grep -Ei 'error|failed|timeout|rejected|handshake' "${WORK_DIR}/xray_probe_999/xray.log" 2>/dev/null | tail -n1 | sed 's/[|]/ /g;s/[[:cntrl:]]/ /g' | cut -c1-180)"
+            domain_control_user_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "${profile_file}")"
+            [ -n "${domain_control_user_id}" ] && domain_control_xray_error="${domain_control_xray_error//${domain_control_user_id}/[hidden]}"
+            [ -n "${domain_control_curl_error}" ] && printf "  curl: %s\n" "${domain_control_curl_error}"
+            [ -n "${domain_control_xray_error}" ] && printf "  Xray: %s\n" "${domain_control_xray_error}"
+        fi
+    else
+        printf "%b\n" "${C_YELLOW}[i] cloudflare.com is TCP-unreachable on the profile port from this WSL network.${C_RESET}"
     fi
 
     print_stage_header 3 3 "Testing the Real VLESS/XHTTP Tunnel and HTTPS Egress"
