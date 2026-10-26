@@ -1,58 +1,68 @@
 # IPClean-Scanner
 
-An interactive Bash utility for finding Cloudflare anycast IPv4 endpoints that can complete a real TLS request for a chosen SNI/hostname. It is designed for quick terminal use and displays scan results directly in the terminal; it does not create persistent result files.
+یک ابزار تعاملی Bash برای یافتن نشانی‌های IPv4 کلودفلر است که از اتصال اینترنت فعلی بتوانند با SNI یا نام دامنهٔ انتخاب‌شده، ارتباط TLS واقعی برقرار کنند. منوها و مراحل اسکریپت به‌صورت عددی و گام‌به‌گام هستند و نتیجه‌ها مستقیماً در ترمینال نمایش داده می‌شوند؛ فایل گزارش دائمی ساخته نمی‌شود.
 
-> **Important limitation:** A scan running on one Internet connection can only verify that connection's route. It cannot prove that an IP works on Irancell, Hamrah-e Aval, or Iranian fixed broadband without test probes actually running on those networks. The table therefore reports those operator columns as `N/A`, rather than inferring or inventing cross-operator results. Use the scanner separately on each network, or add trusted remote probes before treating an IP as multi-operator verified.
+> **محدودیت مهم:** اسکن از یک اتصال اینترنتی فقط مسیر همان اتصال را بررسی می‌کند. بدون پروب‌هایی که واقعاً روی شبکه‌های ایرانسل، همراه اول و اینترنت ثابت اجرا شوند، نمی‌توان عملکرد یک IP را روی آن اپراتورها اثبات کرد. به همین دلیل ستون‌های اپراتورها فعلاً `N/A` نمایش داده می‌شوند، نه نتیجه‌ای حدسی یا ساختگی. برای آزمون چنداپراتوره باید اسکریپت را جداگانه روی هر شبکه اجرا کرد یا پروب‌های راه‌دورِ قابل‌اعتماد به آن اضافه کرد.
 
-## First run
+## اجرای نخست
 
-Run this single command in Bash (it downloads and starts the installer from the `main` branch):
+برای دریافت و اجرای نسخهٔ منتشرشده روی شاخهٔ `main`، این دستور تک‌خطی را در Bash اجرا کنید:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/XiliService/IPClean-Scanner/main/scanner.sh)
 ```
 
-On first launch, the script attempts to install itself as `cf-scanner`. It uses `$PREFIX/bin` in Termux, `/usr/local/bin` when writable, or `~/.local/bin` otherwise. If `~/.local/bin` is not already in `PATH`, the installer adds it to common shell startup files; open a new terminal or run `source ~/.bashrc` (or the relevant shell startup file) if necessary.
+در اجرای نخست، اسکریپت تلاش می‌کند خودش را با نام `cf-scanner` نصب کند. در Termux مسیر `$PREFIX/bin`، در صورت داشتن دسترسی مسیر `/usr/local/bin` و در غیر این صورت مسیر `~/.local/bin` استفاده می‌شود. اگر `~/.local/bin` در `PATH` نباشد، اسکریپت آن را به فایل‌های راه‌اندازی متداول پوسته اضافه می‌کند. ممکن است لازم باشد ترمینال جدیدی باز کنید یا فایل راه‌اندازی مربوط به پوسته‌تان را دوباره بارگذاری کنید.
 
-After installation, launch it from anywhere:
+پس از نصب، از هر مسیری اجرا کنید:
 
 ```bash
 cf-scanner
 ```
 
-The updater may need write access to the selected installation directory. It uses `sudo` when needed and available.
+برای نصب یا بروزرسانی در مسیرهای سیستمی ممکن است دسترسی نوشتن یا `sudo` لازم باشد.
 
-## What it does
+### آزمایش نسخهٔ شاخهٔ کاری
 
-The main menu is numeric and guides the user through a known sequence of steps:
+برای دریافت نسخهٔ فعلی شاخهٔ کاری این نشست و اجرای آن:
 
-1. **Quick Auto Scan** — samples the embedded candidate ranges, tests the current network's latency/reachability, then checks TLS against the selected SNI on port 443.
-2. **Custom Step-by-Step Scan** — choose the SNI and request path, candidate range source, Cloudflare HTTPS port(s), latency profile, and scan depth.
-3. **Test Specific IP/CIDR** — test an IP or sample a CIDR using the same local connection.
-4. **System Diagnostics** — inspect required commands, public IP/ISP lookup availability, and CLI installation status.
-5. **Update Script** — check GitHub `main`; if its semantic version is newer, offer that update. If `main` is equal, older, or unavailable, enter a branch name (or supported GitHub branch URL) to fetch the latest script from that branch.
-6. **Uninstall** — remove the installed `cf-scanner` command.
+```bash
+curl -fsSL https://raw.githubusercontent.com/XiliService/IPClean-Scanner/arena/0152535f-ipclean-scanner/scanner.sh -o scanner.sh && chmod +x scanner.sh && ./scanner.sh
+```
 
-During a scan, the script:
+## امکانات
 
-- samples IPs from embedded candidate CIDRs (or the selected custom CIDR);
-- measures ICMP replies when available, with a TCP-connect timing fallback when ICMP is blocked;
-- sends an HTTPS request to the chosen hostname while pinning the connection to each candidate IP (`curl --resolve`), checks certificate verification, and records TLS/connect and response timing;
-- identifies Cloudflare responses where available from the `CF-Ray` header or `/cdn-cgi/trace`;
-- ranks locally tested IP:port results and prints a copy-friendly list in the terminal.
+منوی اصلی عددی است و این گزینه‌ها را دارد:
 
-The quality score ranks the measurements from the current connection. It is not a guarantee of future performance or of service on another ISP. Cloudflare anycast routing, filtering, and latency may differ by location, operator, time, SNI, and port. The embedded “Iran Golden” label denotes a candidate set only; it is not a claim that every range is currently optimal or universally reachable.
+1. **اسکن سریع خودکار** — نمونه‌گیری از رنج‌های داخلی، سنجش دسترسی و تأخیر از شبکهٔ فعلی و بررسی TLS روی پورت 443.
+2. **اسکن سفارشی مرحله‌به‌مرحله** — انتخاب SNI و مسیر درخواست، منبع رنج IP، پورت یا پورت‌های HTTPS، آستانهٔ تأخیر و عمق اسکن.
+3. **آزمایش IP یا CIDR مشخص** — آزمایش یک IP یا نمونه‌گیری از یک CIDR از طریق همان اتصال محلی.
+4. **عیب‌یابی سیستم** — بررسی ابزارهای موردنیاز، امکان دریافت اطلاعات ISP/IP عمومی و وضعیت نصب دستور.
+5. **بروزرسانی اسکریپت** — ابتدا نسخهٔ شاخهٔ `main` در GitHub بررسی می‌شود. اگر نسخهٔ آن جدیدتر باشد، بروزرسانی پیشنهاد می‌شود؛ اگر نسخه برابر یا قدیمی‌تر باشد یا در دسترس نباشد، نام شاخه یا نشانی پشتیبانی‌شدهٔ آن از کاربر پرسیده می‌شود.
+6. **حذف نصب** — حذف دستور `cf-scanner` از مسیر نصب.
 
-## Requirements
+## روند اسکن
 
-- Bash 3.2 or newer
-- `curl`, `awk`, `sed`, `grep`, `sort`, `head`, `tr`, `cut`, `wc`
-- `ping` is optional; TCP-connect timing is used if it is missing or ICMP replies are unavailable.
-- An Internet connection to the selected SNI and GitHub for the first-run download/update.
+اسکریپت در حین اجرا:
 
-The script uses temporary files during a scan and removes its temporary workspace on exit. It does not save scan reports or candidate lists to the repository or a persistent results directory.
+- از CIDRهای تعبیه‌شده یا رنج سفارشی، IPهای نمونه تولید می‌کند؛ اسکن همهٔ آدرس‌های رنج‌های بزرگ انجام نمی‌شود.
+- در صورت امکان پاسخ ICMP را می‌سنجد؛ اگر ICMP در دسترس نباشد یا پاسخ ندهد، زمان برقراری اتصال TCP را به‌عنوان جایگزین بررسی می‌کند.
+- با `curl --resolve` اتصال HTTPS را به IP انتخابی هدایت می‌کند، گواهی TLS را بررسی می‌کند و زمان TLS و پاسخ را می‌سنجد.
+- در صورت موجودبودن، پاسخ کلودفلر را از سربرگ `CF-Ray` یا مسیر `/cdn-cgi/trace` تشخیص می‌دهد.
+- IPهای آزموده‌شده را بر اساس سنجه‌های اتصال فعلی مرتب می‌کند و فهرست قابل‌کپی را در ترمینال نشان می‌دهد.
 
-## Optional command-line usage
+امتیاز فقط برای رتبه‌بندی نتایج همین اتصال است و عملکرد روی اپراتور دیگر یا در زمان آینده را تضمین نمی‌کند. مسیر Anycast، فیلترینگ و تأخیر کلودفلر می‌تواند با توجه به مکان، اپراتور، زمان، SNI و پورت تغییر کند. عنوان «Iran Golden» صرفاً به مجموعه‌ای از رنج‌های پیشنهادی برای نمونه‌گیری اشاره دارد و تضمین نمی‌کند که آن رنج‌ها همیشه یا برای همهٔ اپراتورها مناسب باشند.
+
+## پیش‌نیازها
+
+- Bash نسخهٔ 3.2 یا جدیدتر
+- ابزارهای `curl`، `awk`، `sed`، `grep`، `sort`، `head`، `tr`، `cut` و `wc`
+- دستور `ping` اختیاری است؛ اگر موجود نباشد یا پاسخ ICMP دریافت نشود، سنجش زمان اتصال TCP جایگزین می‌شود.
+- اتصال اینترنت به دامنهٔ مورد آزمون و GitHub برای دریافت اولیه یا بروزرسانی
+
+اسکریپت هنگام اسکن از فایل‌های موقت استفاده می‌کند و پوشهٔ موقت را هنگام خروج پاک می‌کند. گزارش یا فهرست نتایج در مخزن یا مسیر دائمی ذخیره نمی‌شود.
+
+## اجرای اختیاری از خط فرمان
 
 ```bash
 cf-scanner --help
@@ -62,22 +72,28 @@ cf-scanner --diagnostics
 cf-scanner --update
 ```
 
-`--quick` uses the default SNI `speed.cloudflare.com` when none is supplied. For the most meaningful test, choose a hostname that is proxied by Cloudflare and represents the SNI used by your actual configuration. The TLS check verifies the hostname's certificate and HTTP response; it does not test a particular tunnel protocol, WebSocket path, or origin unless you select a custom path in the menu.
+اگر برای `--quick` دامنه‌ای وارد نشود، SNI پیش‌فرض `speed.cloudflare.com` است. برای نتیجهٔ معنادارتر، نام دامنه‌ای را وارد کنید که از طریق کلودفلر پروکسی می‌شود و همان SNI کانفیگ واقعی شماست. آزمون TLS، گواهی دامنه و پاسخ HTTP را بررسی می‌کند؛ به‌طور پیش‌فرض پروتکل تونل، مسیر WebSocket یا سرور مبدأ را آزمایش نمی‌کند. در منوی اسکن سفارشی می‌توانید مسیر دلخواه را انتخاب کنید.
 
-## Updating
+## بروزرسانی
 
-Choose **5** in the menu or run `cf-scanner --update`. The updater reads `SCRIPT_VERSION` from the raw script on GitHub. Branch names are interpreted as branches in this repository. It also accepts GitHub `/tree/<branch>` or `/blob/<branch>/scanner.sh` URLs, as well as a `raw.githubusercontent.com` script URL.
+گزینهٔ **5** منو یا دستور زیر را اجرا کنید:
 
-The script should only be installed from a repository/branch you trust. A branch update replaces the installed script.
+```bash
+cf-scanner --update
+```
 
-## Security and accuracy notes
+نسخه از مقدار `SCRIPT_VERSION` در اسکریپت خام GitHub خوانده می‌شود. نام شاخه به‌عنوان شاخه‌ای از همین مخزن در نظر گرفته می‌شود. همچنین نشانی‌های GitHub با قالب `/tree/<branch>` یا `/blob/<branch>/scanner.sh` و نشانی مستقیم اسکریپت در `raw.githubusercontent.com` پشتیبانی می‌شوند.
 
-- A successful TLS request means that the current network reached Cloudflare at the candidate IP for the supplied SNI at scan time; it does not imply that the IP is “clean” for every user or every protocol.
-- Ping is not required for TLS to work. Some networks block ICMP while allowing HTTPS.
-- The scan only samples large CIDRs; it does not exhaustively scan every address.
-- Avoid scanning custom ranges that you do not own or have permission to test. The default ranges are Cloudflare address space and each candidate is tested with a small number of requests.
+فقط اسکریپت را از مخزن یا شاخه‌ای دریافت کنید که به آن اعتماد دارید؛ بروزرسانی شاخه، نسخهٔ نصب‌شده را جایگزین می‌کند.
 
-## Repository contents
+## نکات دقت و ایمنی
 
-- `scanner.sh` — the English-only interactive scanner and self-installer.
-- `README.md` — this guide.
+- موفقیت TLS یعنی در زمان اسکن، شبکهٔ فعلی برای SNI واردشده به کلودفلر و IP انتخابی وصل شده است؛ این نتیجه به‌تنهایی سالم‌بودن IP را برای همهٔ کاربران یا همهٔ پروتکل‌ها ثابت نمی‌کند.
+- برای کارکرد HTTPS پاسخ‌دادن به پینگ الزامی نیست؛ بعضی شبکه‌ها ICMP را مسدود می‌کنند ولی HTTPS برقرار است.
+- رنج‌های بزرگ به‌صورت نمونه‌ای اسکن می‌شوند، نه کامل.
+- رنج سفارشی را فقط در صورت داشتن مجوز آزمایش کنید. رنج‌های پیش‌فرض متعلق به فضای آدرس کلودفلر هستند و برای هر IP تعداد محدودی درخواست ارسال می‌شود.
+
+## فایل‌های مخزن
+
+- `scanner.sh` — اسکنر تعاملی و نصب‌کنندهٔ خودکار؛ تمام متن‌های داخل اسکریپت انگلیسی هستند.
+- `README.md` — همین راهنمای فارسی.
