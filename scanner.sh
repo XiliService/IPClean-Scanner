@@ -14,7 +14,7 @@ set -u
 # ------------------------------------------------------------------------------
 # Global Metadata & Constants
 # ------------------------------------------------------------------------------
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.1.1"
 REPO_OWNER="XiliService"
 REPO_NAME="IPClean-Scanner"
 DEFAULT_BRANCH="main"
@@ -820,7 +820,12 @@ print("  Path            : %s" % p["path"])
 print("  TLS SNI         : %s" % p["sni"])
 print("  Fingerprint     : %s" % (p["fingerprint"] or "Xray default"))
 print("  User ID         : hidden")
-print("  Encryption      : hidden")
+enc = p.get("encryption", "none") or "none"
+if enc == "none":
+    print("  VLESS Encryption: none")
+else:
+    parts = enc.split(".")
+    print("  VLESS Encryption: %s (remaining parameters hidden)" % ".".join(parts[:3]))
 PY
 }
 
@@ -854,7 +859,7 @@ if p.get("fingerprint"):
 if p.get("alpn"):
     tls["alpn"] = p["alpn"]
 config = {
-    "log": {"loglevel": "none"},
+        "log": {"loglevel": "warning"},
     "inbounds": [{
         "listen": "127.0.0.1",
         "port": int(socks_port),
@@ -965,7 +970,7 @@ probe_candidate_with_xray() {
         reason="XRAY_EXITED"
     fi
     printf "%s|%s|%s|%s|%s|%s\n" "${reason}" "${candidate_ip}" "${tcp_ms}" "${http_code}" "${curl_exit}" "${index}" > "${result_file}.fail"
-    rm -f "${config_file}" "${xray_log}" "${response_file}" "${curl_error}"
+    rm -f "${config_file}" "${response_file}"
     return 1
 }
 
@@ -1089,12 +1094,24 @@ menu_quick_scan() {
         xray_exit_count="$(awk -F'|' '$1 == "XRAY_EXITED" { n++ } END { print n + 0 }' "${fail_file}")"
         tunnel_fail_count="$(awk -F'|' '$1 == "TUNNEL_OR_EGRESS_FAILED" { n++ } END { print n + 0 }' "${fail_file}")"
         printf "%b\n" "${C_RED}[-] No sampled IP completed a real VLESS/XHTTP request through the selected profile.${C_RESET}"
-        printf "  Xray core exits: %d | Tunnel or HTTPS egress failures: %d\n" "${xray_exit_count}" "${tunnel_fail_count}"
+        printf "  Xray process failures: %d | VLESS or HTTPS egress failures: %d\n" "${xray_exit_count}" "${tunnel_fail_count}"
         if [ -s "${fail_file}" ]; then
             printf "%b\n" "  Sample failures (IP | TCP ms | HTTP code | curl exit):"
-            awk -F'|' 'shown < 5 { printf "    %s | %sms | %s | %s", $2, $3, $4, $5; print ""; shown++ }' "${fail_file}"
+            awk -F'|' 'shown < 3 { printf "    %s | %sms | %s | %s", $2, $3, $4, $5; print ""; shown++ }' "${fail_file}"
+            local failure_type failure_ip failure_tcp failure_http failure_curl failure_index curl_detail xray_detail profile_user_id
+            profile_user_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "${profile_file}")"
+            while IFS='|' read -r failure_type failure_ip failure_tcp failure_http failure_curl failure_index; do
+                [ -z "${failure_ip}" ] && continue
+                curl_detail="$(head -n1 "${WORK_DIR}/xray_probe_${failure_index}/curl.err" 2>/dev/null | sed 's/[|]/ /g;s/[[:cntrl:]]/ /g' | cut -c1-180)"
+                xray_detail="$(grep -Ei 'error|failed|timeout|rejected|handshake' "${WORK_DIR}/xray_probe_${failure_index}/xray.log" 2>/dev/null | tail -n1 | sed 's/[|]/ /g;s/[[:cntrl:]]/ /g' | cut -c1-180)"
+                if [ -n "${profile_user_id}" ]; then
+                    xray_detail="${xray_detail//${profile_user_id}/[hidden]}"
+                fi
+                [ -n "${curl_detail}" ] && printf "      %s curl: %s\n" "${failure_ip}" "${curl_detail}"
+                [ -n "${xray_detail}" ] && printf "      %s Xray: %s\n" "${failure_ip}" "${xray_detail}"
+            done < <(head -n 3 "${fail_file}")
         fi
-        printf "%b\n" "${C_YELLOW}[i] This result is specific to the current network and the copied profile. No IP is being labeled clean.${C_RESET}"
+        printf "%b\n" "${C_YELLOW}[i] No IP is being labeled clean. Compare this same scan on the operator where the profile is known to work; this separates a profile/core issue from MCI filtering.${C_RESET}"
         pause_enter
         return 1
     fi
