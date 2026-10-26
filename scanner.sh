@@ -14,7 +14,7 @@ set -u
 # ------------------------------------------------------------------------------
 # Global Metadata & Constants
 # ------------------------------------------------------------------------------
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 REPO_OWNER="XiliService"
 REPO_NAME="IPClean-Scanner"
 DEFAULT_BRANCH="main"
@@ -966,7 +966,7 @@ probe_candidate_with_xray() {
     for attempt in 1 2 3; do
         curl_exit=0
         curl_stats="$(curl -sS -L --socks5-hostname "127.0.0.1:${socks_port}" \
-            --connect-timeout 3 --max-time 8 \
+            --connect-timeout 8 --max-time 15 \
             -o "${response_file}" -w "%{http_code}|%{time_total}" \
             "https://www.cloudflare.com/cdn-cgi/trace" 2>"${curl_error}")" || curl_exit=$?
         if [ "${curl_exit}" -ne 7 ]; then
