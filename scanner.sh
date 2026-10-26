@@ -14,7 +14,7 @@ set -u
 # ------------------------------------------------------------------------------
 # Global Metadata & Constants
 # ------------------------------------------------------------------------------
-SCRIPT_VERSION="1.1.1"
+SCRIPT_VERSION="1.2.0"
 REPO_OWNER="XiliService"
 REPO_NAME="IPClean-Scanner"
 DEFAULT_BRANCH="main"
@@ -907,6 +907,19 @@ for elapsed, ip in sorted(results):
 PY
 }
 
+check_single_tcp() {
+    python3 - "$1" "$2" <<'PY'
+import socket, sys, time
+host, port = sys.argv[1], int(sys.argv[2])
+started = time.monotonic()
+try:
+    with socket.create_connection((host, port), timeout=2.0):
+        print("%.1f" % ((time.monotonic() - started) * 1000))
+except OSError:
+    sys.exit(1)
+PY
+}
+
 probe_candidate_with_xray() {
     local profile_file="$1"
     local candidate_ip="$2"
@@ -1065,6 +1078,27 @@ menu_quick_scan() {
         return 1
     fi
     rm -f "${validation_config}" "${WORK_DIR}/xray_validation.err"
+
+    local baseline_address baseline_tcp_ms baseline_result baseline_curl_error baseline_xray_error
+    baseline_address="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["address"])' "${profile_file}")"
+    printf "\n%b\n" "${C_CYAN}${C_BOLD}Control test: original profile address ${baseline_address}:${profile_port}${C_RESET}"
+    if baseline_tcp_ms="$(check_single_tcp "${baseline_address}" "${profile_port}")"; then
+        baseline_result="${WORK_DIR}/baseline.result"
+        if probe_candidate_with_xray "${profile_file}" "${baseline_address}" "${baseline_tcp_ms}" 0 "${baseline_result}"; then
+            printf "%b\n" "${C_GREEN}[+] Original-address control PASSED: this Xray/profile setup completed HTTPS on the current network.${C_RESET}"
+        else
+            printf "%b\n" "${C_YELLOW}[i] Original-address control did not complete HTTPS on this network; candidate scan will continue.${C_RESET}"
+            baseline_curl_error="$(head -n1 "${WORK_DIR}/xray_probe_0/curl.err" 2>/dev/null | sed 's/[|]/ /g;s/[[:cntrl:]]/ /g' | cut -c1-180)"
+            baseline_xray_error="$(grep -Ei 'error|failed|timeout|rejected|handshake' "${WORK_DIR}/xray_probe_0/xray.log" 2>/dev/null | tail -n1 | sed 's/[|]/ /g;s/[[:cntrl:]]/ /g' | cut -c1-180)"
+            local baseline_user_id
+            baseline_user_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "${profile_file}")"
+            [ -n "${baseline_user_id}" ] && baseline_xray_error="${baseline_xray_error//${baseline_user_id}/[hidden]}"
+            [ -n "${baseline_curl_error}" ] && printf "  curl: %s\n" "${baseline_curl_error}"
+            [ -n "${baseline_xray_error}" ] && printf "  Xray: %s\n" "${baseline_xray_error}"
+        fi
+    else
+        printf "%b\n" "${C_YELLOW}[i] Original-address control is TCP-unreachable from this network; candidate scan will continue.${C_RESET}"
+    fi
 
     print_stage_header 3 3 "Testing the Real VLESS/XHTTP Tunnel and HTTPS Egress"
     local idx=0
